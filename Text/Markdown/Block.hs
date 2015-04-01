@@ -125,7 +125,7 @@ lineType ms t
     isRule :: Text -> Bool
     isRule = maybe False go . T.uncons . T.strip
       where
-        go (c, rest) = c `elem` "*-_" && maybe False (>=3) (countOf c rest)
+        go (c, rest) = c `elem` ['*','-','_'] && maybe False (>=3) (countOf c rest)
         countOf c = let go' (Just n) c' | c'==c   = Just (n+1)
                                         | c'==' ' = Just n
                         go' _ _                   = Nothing
