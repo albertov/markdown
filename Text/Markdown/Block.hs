@@ -8,9 +8,11 @@ module Text.Markdown.Block
     ( Block (..)
     , ListType (..)
     , toBlocks
+    , toBlockLines
     ) where
 
 import Prelude
+import Control.Monad (msum)
 #if MIN_VERSION_conduit(1, 0, 0)
 import Data.Conduit
 #else
@@ -31,6 +33,11 @@ import qualified Data.Map as Map
 (=$=) :: Monad m => Pipe a a b x m y -> Pipe b b c y m z -> Pipe a a c x m z
 (=$=) = pipeL
 #endif
+
+toBlockLines :: Block Text -> Block [Text]
+toBlockLines = fmap $ map T.stripEnd
+                    . concatMap (T.splitOn "  \r\n")
+                    . T.splitOn "  \n"
 
 toBlocks :: Monad m => MarkdownSettings -> Conduit Text m (Block Text)
 toBlocks ms =
@@ -226,20 +233,27 @@ start ms t =
                     isNonPara LineBlank = True
                     isNonPara LineFenced{} = True
                     isNonPara LineBlockQuote{} = not $ msBlankBeforeBlockquote ms
+                    isNonPara LineHtml{} = True -- See example 95 in Common Markdown spec
                     isNonPara _ = False
                 (mfinal, ls) <- takeTillConsume (\x -> isNonPara (lineType ms x) || listStartIndent x)
                 maybe (return ()) leftover mfinal
                 yield $ Right $ BlockPara $ T.intercalate "\n" $ t' : ls
 
 isHtmlStart :: T.Text -> Bool
+-- Allow for up to three spaces before the opening tag.
+isHtmlStart t | "    " `T.isPrefixOf` t = False
 isHtmlStart t =
-    case T.stripPrefix "<" t of
+    case T.stripPrefix "<" $ T.dropWhile (== ' ') t of
         Nothing -> False
         Just t' ->
-            let (name, rest) = T.break (\c -> c `elem` " >") t'
-             in T.all isValidTagName name &&
+            let (name, rest)
+                    | Just _ <- T.stripPrefix "!--" t' = ("--", t')
+                    | otherwise = T.break (\c -> c == ' ' || c == '>') t'
+             in (T.all isValidTagName name &&
                 not (T.null name) &&
-                (not ("/" `T.isPrefixOf` rest) || ("/>" `T.isPrefixOf` rest))
+                (not ("/" `T.isPrefixOf` rest) || ("/>" `T.isPrefixOf` rest)))
+
+                || isPI t' || isCommentCData t'
   where
     isValidTagName :: Char -> Bool
     isValidTagName c =
@@ -250,6 +264,9 @@ isHtmlStart t =
         (c == '_') ||
         (c == '/') ||
         (c == '!')
+
+    isPI = ("?" `T.isPrefixOf`)
+    isCommentCData = ("!" `T.isPrefixOf`)
 
 takeTill :: Monad m => (i -> Bool) -> Conduit i m i
 takeTill f =
@@ -271,10 +288,8 @@ takeTillConsume f =
 
 listStart :: Text -> Maybe (ListType, Text)
 listStart t0
-    | Just t' <- T.stripPrefix "* " t = Just (Unordered, t')
-    | Just t' <- T.stripPrefix "+ " t = Just (Unordered, t')
-    | Just t' <- T.stripPrefix "- " t = Just (Unordered, t')
-    | Just t' <- stripNumber t, Just t'' <- stripSeparator t' = Just (Ordered, t'')
+    | Just t' <- stripUnorderedListSeparator t = Just (Unordered, t')
+    | Just t' <- stripNumber t, Just t'' <- stripOrderedListSeparator t' = Just (Ordered, t'')
     | otherwise = Nothing
   where
     t = T.stripStart t0
@@ -286,13 +301,19 @@ stripNumber x
   where
     (y, z) = T.span isDigit x
 
-stripSeparator :: Text -> Maybe Text
-stripSeparator x =
-    case T.uncons x of
-        Nothing -> Nothing
-        Just ('.', y) -> Just y
-        Just (')', y) -> Just y
-        _ -> Nothing
+stripUnorderedListSeparator :: Text -> Maybe Text
+stripUnorderedListSeparator =
+  stripPrefixChoice ["* ", "*\t", "+ ", "+\t", "- ", "-\t"]
+
+stripOrderedListSeparator :: Text -> Maybe Text
+stripOrderedListSeparator =
+  stripPrefixChoice [". ", ".\t", ") ", ")\t"]
+
+-- | Attempt to strip each of the prefixes in @xs@ from the start of @x@. As
+-- soon as one matches, return the remainder of @x@. Prefixes are tried in
+-- order. If none match, return @Nothing@.
+stripPrefixChoice :: [Text] -> Text -> Maybe Text
+stripPrefixChoice xs x = msum $ map (flip T.stripPrefix x) xs
 
 getIndented :: Monad m => Int -> Conduit Text m Text
 getIndented leader =

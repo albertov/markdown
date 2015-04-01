@@ -10,6 +10,8 @@ import Text.Blaze.Html.Renderer.Text (renderHtml)
 import Control.Monad (forM_)
 import qualified Data.Set as Set
 import qualified Data.Map as Map
+import Data.List (isInfixOf)
+import Data.Maybe (fromMaybe)
 
 import qualified Filesystem.Path.CurrentOS as F
 import qualified Filesystem as F
@@ -44,6 +46,16 @@ main = do
   hspec $ do
     describe "block" blockSpecs
     describe "inline" inlineSpecs
+    describe "line break" $ do
+        it "is inserted for a single newline after two spaces"
+            $ check "<p>Hello<br>World!</p>" "Hello  \nWorld!"
+        it "is also inserted for a single CRLF after two spaces"
+            $ check "<p>Hello<br>World!</p>" "Hello  \r\nWorld!"
+        it "preserves quote nesting of the previous line"
+            $ check "<blockquote><p>Q1<br>Q2</p></blockquote><p>P2</p>"
+                    "> Q1  \nQ2\n\nP2"
+        it "consumes all trailing whitespace on the previous line"
+            $ check "<p>Hello<br>World!</p>" "Hello     \nWorld!"
     describe "paragraphs" $ do
         it "simple"
             $ check "<p>Hello World!</p>" "Hello World!"
@@ -137,6 +149,20 @@ main = do
             $ check
                 "<h1>foo</h1><h2>bar</h2>"
                 "foo\n=============\n\nbar\n----------------\n"
+    describe "headings with ID" $ do
+        let withHeadingId = def { msAddHeadingId = True }
+        it "without spaces"
+            $ checkSet withHeadingId
+                "<h1 id=\"foo\">foo</h1><h2 id=\"bar\">bar</h2><h3 id=\"baz\">baz</h3>"
+                "# foo\n\n##     bar\n\n###baz"
+        it "with spaces"
+            $ checkSet withHeadingId
+                "<h1 id=\"executive-summary\">Executive summary</h1>"
+                "# Executive summary"
+        it "with special characters"
+            $ checkSet withHeadingId
+                "<h1 id=\"executive-summary-.-_:\">Executive summary .!@#$%^*()-_=:</h1>"
+                "# Executive summary .!@#$%^*()-_=:"
     describe "blockquotes" $ do
         it "simple"
             $ check
@@ -172,7 +198,7 @@ main = do
     -}
 
     describe "images" $ do
-        it "simple" $ check 
+        it "simple" $ check
             "<p><img src=\"http://link.to/image.jpg\" alt=\"foo\"></p>"
             "![foo](http://link.to/image.jpg)"
         it "title" $ check
@@ -234,6 +260,9 @@ main = do
     describe "examples" $ sequence_ examples
     describe "John Gruber's test suite" $ sequence_ gruber
 
+    it "comments without spaces #22" $
+        check "<!--<>-->" "<!--<>-->"
+
 getExamples :: IO [Spec]
 getExamples = do
     files <- F.listDirectory "test/examples"
@@ -242,7 +271,13 @@ getExamples = do
     go fp = do
         input <- F.readTextFile fp
         output <- F.readTextFile $ F.replaceExtension fp "html"
-        return $ it (F.encodeString $ F.basename fp) $ check (fromStrict $ T.strip output) (fromStrict input)
+        let (checker, stripper)
+                | "-spec" `isInfixOf` F.encodeString fp = (check', dropFinalLF)
+                | otherwise = (check, T.strip)
+
+        return $ it (F.encodeString $ F.basename fp) $ checker (fromStrict $ stripper output) (fromStrict input)
+
+    dropFinalLF t = fromMaybe t $ T.stripSuffix "\n" t
 
 getGruber :: IO [Spec]
 getGruber = do
